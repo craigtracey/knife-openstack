@@ -20,6 +20,7 @@
 
 require 'chef/knife/openstack_base'
 require 'chef/knife/winrm_base'
+require 'net/ssh/gateway'
 
 class Chef
   class Knife
@@ -200,13 +201,35 @@ class Chef
       :description => "The file path containing user data information for this server",
       :proc => Proc.new { |user_data| open(user_data) { |f| f.read }  }
 
+      def establish_ssh_tunnel(hostname, port)
+        gateway_host = Chef::Config[:knife][:ssh_gateway]
+        gateway_user = Chef::Config[:knife][:ssh_gateway_user] || 'root'
+        gateway = Net::SSH::Gateway.new(
+          gateway_host, gateway_user
+        )
+        tunnel_port = gateway.open(hostname, port)
+        return gateway, tunnel_port
+      end
+
       def tcp_test_ssh(hostname, port)
+
+        unless Chef::Config[:knife][:ssh_gateway].nil?
+          Chef::Log.debug("Establishing ssh tunnel to #{Chef::Config[:knife][:ssh_gateway]}")
+          gateway, tunnel_port = establish_ssh_tunnel(hostname, port)
+          Chef::Log.debug("Established ssh tunnel with port #{tunnel_port}")
+          port = tunnel_port
+          hostname = '127.0.0.1'
+        end
+
         tcp_socket = TCPSocket.new(hostname, port)
         readable = IO.select([tcp_socket], nil, nil, 5)
         if readable
-          Chef::Log.debug("sshd accepting connections on #{hostname} port #{port}, banner is #{tcp_socket.gets}")
-          yield
-          true
+          banner = tcp_socket.gets
+          if !banner.nil?
+            Chef::Log.debug("sshd accepting connections on #{hostname} port #{port}, banner is #{banner}")
+            yield
+            true
+          end
         else
           false
         end
@@ -224,6 +247,7 @@ class Chef
         sleep 2
         false
       ensure
+        gateway && gateway.close(port)
         tcp_socket && tcp_socket.close
       end
 
